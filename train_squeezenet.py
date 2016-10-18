@@ -9,16 +9,17 @@ import squeezenet
 
 slim = tf.contrib.slim
 
-DATA_DIR = '/mnt/data1/cifar10'
-TRAIN_DIR = '/mnt/data1/squeezenet_logs/LR_001/train'
+DATA_DIR = '/mnt/data1/cifar'
+TRAIN_DIR = '/mnt/data1/squeezenet_results/LR_01_95_DR_BN/train'
 BATCH_SIZE = 256
-INIT_LEARNING_RATE = 0.001
-LR_DECAY = 0.94
+INIT_LEARNING_RATE = 0.01
+LR_DECAY = 0.95
 NUM_EPOCHS_PER_DECAY = 2
-MAX_STEPS = 5000
+MAX_STEPS = 8000
+NUM_CLONES = 3
 
 tf.logging.set_verbosity(tf.logging.INFO)
-deploy_config = model_deploy.DeploymentConfig(num_clones=3)
+deploy_config = model_deploy.DeploymentConfig(num_clones=NUM_CLONES)
 
 with tf.device(deploy_config.variables_device()):
     global_step = slim.create_global_step()
@@ -55,6 +56,13 @@ def clone_fn(batch_queue):
     images, labels = batch_queue.dequeue()
     logits, end_points = network_fn(images)
     slim.losses.softmax_cross_entropy(logits, labels)
+    predictions = tf.argmax(logits, 1)
+    labels = tf.argmax(labels, 1)
+    accuracy, update_op = slim.metrics.streaming_accuracy(
+       predictions,
+       labels,
+       metrics_collections=['accuracy'],
+       updates_collections=tf.GraphKeys.UPDATE_OPS)
     return end_points
 
 summaries = set(tf.get_collection(tf.GraphKeys.SUMMARIES))
@@ -62,7 +70,7 @@ clones = model_deploy.create_clones(deploy_config, clone_fn, [batch_queue])
 first_clone_scope = deploy_config.clone_scope(0)
 update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS, first_clone_scope)
 
-with tf.name_scope('training'):
+with tf.name_scope('synchronization'):
     with tf.device(deploy_config.optimizer_device()):
         decay_steps = int(dataset.num_samples / BATCH_SIZE *
                           NUM_EPOCHS_PER_DECAY)
@@ -98,9 +106,10 @@ with tf.name_scope('summaries'):
         summaries.add(tf.histogram_summary(variable.op.name, variable))
     summaries.add(tf.scalar_summary('learning_rate', learning_rate,
                                     name='learning_rate'))
-    summaries.add(tf.scalar_summary('total_loss', total_loss,
+    summaries.add(tf.scalar_summary('eval/total_loss', total_loss,
                                     name='total_loss_summary'))
-
+    accuracy = tf.get_collection('accuracy', first_clone_scope)[0]
+    summaries.add(tf.scalar_summary('eval/accuracy', accuracy))
     summaries |= set(tf.get_collection(tf.GraphKeys.SUMMARIES,
                                        first_clone_scope))
     summary_op = tf.merge_summary(list(summaries), name='summary_op')
@@ -110,6 +119,6 @@ slim.learning.train(
     TRAIN_DIR,
     summary_op=summary_op,
     number_of_steps=MAX_STEPS,
-    log_every_n_steps=10,
-    save_summaries_secs=30,
-    save_interval_secs=120)
+    log_every_n_steps=20,
+    save_summaries_secs=60,
+    save_interval_secs=180)

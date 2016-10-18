@@ -8,7 +8,7 @@ import squeezenet
 slim = tf.contrib.slim
 
 BATCH_SIZE = 256
-CHECKPOINT_DIR = '/mnt/data1/squeezenet_test/wee/train'
+CHECKPOINT_DIR = '/mnt/data1/squeezenet_results/LR_01_95_DR_BN/train'
 EVAL_DIR = CHECKPOINT_DIR[:-5] + 'test'
 DATA_DIR = '/mnt/data1/cifar'
 EVAL_DEVICE = '/cpu:0'
@@ -59,6 +59,6 @@ with tf.Graph().as_default() as g:
             logdir=EVAL_DIR,
             num_evals=num_batches,
             eval_op=update_op,
-            eval_interval_secs=45,
+            eval_interval_secs=160,
             session_config=sess_config,
             variables_to_restore=slim.get_variables_to_restore())
