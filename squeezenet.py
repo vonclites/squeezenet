@@ -69,5 +69,6 @@ def inference(images):
 
 
 def squeezenet_arg_scope():
-    with slim.arg_scope([slim.conv2d], normalizer_fn=slim.batch_norm) as sc:
+    with slim.arg_scope([slim.conv2d], normalizer_fn=slim.batch_norm,
+                        device='/device:CPU:0') as sc:
         return sc

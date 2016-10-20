@@ -9,13 +9,13 @@ import squeezenet
 
 slim = tf.contrib.slim
 
-DATA_DIR = '/mnt/data1/cifar'
-TRAIN_DIR = '/mnt/data1/squeezenet_results/LR_01_95_DR_BN/train'
+DATA_DIR = '/home/dom/cifar'
+TRAIN_DIR = '/mnt/data1/squeezenet_results/original/train'
 BATCH_SIZE = 256
-INIT_LEARNING_RATE = 0.01
-LR_DECAY = 0.95
+INIT_LEARNING_RATE = 0.001
+LR_DECAY = 0.93
 NUM_EPOCHS_PER_DECAY = 2
-MAX_STEPS = 8000
+MAX_STEPS = 5000
 NUM_CLONES = 3
 
 tf.logging.set_verbosity(tf.logging.INFO)
@@ -24,7 +24,7 @@ deploy_config = model_deploy.DeploymentConfig(num_clones=NUM_CLONES)
 with tf.device(deploy_config.variables_device()):
     global_step = slim.create_global_step()
 
-dataset = dataset_factory.get_dataset('cifar10', 'train', '/mnt/data1/cifar')
+dataset = dataset_factory.get_dataset('cifar10', 'train', DATA_DIR)
 
 network_fn = squeezenet.inference
 
@@ -35,7 +35,7 @@ with tf.device(deploy_config.inputs_device()):
     with tf.name_scope('inputs'):
         provider = slim.dataset_data_provider.DatasetDataProvider(
               dataset,
-              num_readers=7,
+              num_readers=4,
               common_queue_capacity=20 * BATCH_SIZE,
               common_queue_min=10 * BATCH_SIZE)
         [image, label] = provider.get(['image', 'label'])
@@ -44,7 +44,7 @@ with tf.device(deploy_config.inputs_device()):
         images, labels = tf.train.batch(
               [image, label],
               batch_size=BATCH_SIZE,
-              num_threads=9,
+              num_threads=8,
               capacity=5 * BATCH_SIZE)
         labels = slim.one_hot_encoding(labels, 10)
 
@@ -100,8 +100,6 @@ with tf.name_scope('summaries'):
         summaries.add(tf.histogram_summary('activations/' + end_point, x))
         summaries.add(tf.scalar_summary('sparsity/' + end_point,
                                         tf.nn.zero_fraction(x)))
-    for loss in tf.get_collection(tf.GraphKeys.LOSSES, first_clone_scope):
-        summaries.add(tf.scalar_summary('losses/%s' % loss.op.name, loss))
     for variable in slim.get_model_variables():
         summaries.add(tf.histogram_summary(variable.op.name, variable))
     summaries.add(tf.scalar_summary('learning_rate', learning_rate,
@@ -119,6 +117,6 @@ slim.learning.train(
     TRAIN_DIR,
     summary_op=summary_op,
     number_of_steps=MAX_STEPS,
-    log_every_n_steps=20,
+    log_every_n_steps=50,
     save_summaries_secs=60,
-    save_interval_secs=180)
+    save_interval_secs=60*3)

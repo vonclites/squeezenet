@@ -7,8 +7,8 @@ import squeezenet
 
 slim = tf.contrib.slim
 
-BATCH_SIZE = 256
-CHECKPOINT_DIR = '/mnt/data1/squeezenet_results/LR_01_95_DR_BN/train'
+BATCH_SIZE = 128
+CHECKPOINT_DIR = '/mnt/data1/squeezenet_results/original/train'
 EVAL_DIR = CHECKPOINT_DIR[:-5] + 'test'
 DATA_DIR = '/mnt/data1/cifar'
 EVAL_DEVICE = '/cpu:0'
