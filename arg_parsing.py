@@ -70,7 +70,7 @@ def train_parser():
 
 def eval_parser():
     prog_name = 'Squeezenet Evaluation Program'
-    desc = '''Program for evaluation performance of squeezenet on the CIFAR-10
+    desc = '''Program for evaluating performance of squeezenet on the CIFAR-10
               dataset.'''
     parser = argparse.ArgumentParser(prog=prog_name, description=desc)
 

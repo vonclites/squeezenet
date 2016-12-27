@@ -15,19 +15,6 @@ tf.logging.set_verbosity(tf.logging.INFO)
 deploy_config = model_deploy.DeploymentConfig(num_clones=args.num_gpus)
 
 
-def clone_fn(batch_queue):
-    images, labels = batch_queue.dequeue()
-    logits, end_points = network_fn(images)
-    slim.losses.softmax_cross_entropy(logits, labels)
-    predictions = tf.argmax(logits, 1)
-    labels = tf.argmax(labels, 1)
-    accuracy, update_op = slim.metrics.streaming_accuracy(
-       predictions,
-       labels,
-       metrics_collections=['accuracy'],
-       updates_collections=tf.GraphKeys.UPDATE_OPS)
-    return end_points
-
 with tf.Graph().as_default() as g:
     with tf.device(deploy_config.variables_device()):
         global_step = slim.create_global_step()
@@ -35,6 +22,19 @@ with tf.Graph().as_default() as g:
     dataset = dataset_factory.get_dataset('cifar10', 'train', args.data_dir)
 
     network_fn = squeezenet.inference
+
+    def clone_fn(batch_queue):
+        images, labels = batch_queue.dequeue()
+        logits, end_points = network_fn(images)
+        slim.losses.softmax_cross_entropy(logits, labels)
+        predictions = tf.argmax(logits, 1)
+        labels = tf.argmax(labels, 1)
+        accuracy, update_op = slim.metrics.streaming_accuracy(
+           predictions,
+           labels,
+           metrics_collections=['accuracy'],
+           updates_collections=tf.GraphKeys.UPDATE_OPS)
+        return end_points
 
     image_preprocessing_fn = preprocessing_factory.get_preprocessing(
         'cifarnet', is_training=True)
@@ -64,7 +64,7 @@ with tf.Graph().as_default() as g:
     first_clone_scope = deploy_config.clone_scope(0)
     update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS, first_clone_scope)
 
-    with tf.name_scope('synchronization'):
+    with tf.name_scope('synchronized_train'):
         with tf.device(deploy_config.optimizer_device()):
             learning_rate = tf.train.exponential_decay(
                 args.learning_rate,
