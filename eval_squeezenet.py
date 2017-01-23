@@ -37,7 +37,7 @@ with tf.Graph().as_default() as g:
             num_threads=args.reader_threads,
             capacity=5 * args.batch_size)
 
-        logits, end_points = squeezenet.inference(images)
+        logits, end_points = squeezenet.inference(images, is_training=False)
 
         predictions = tf.argmax(logits, 1)
 

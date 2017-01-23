@@ -35,8 +35,10 @@ def expand(inputs, num_outputs):
     return tf.concat(3, [e1x1, e3x3])
 
 
-def inference(images):
-    with slim.arg_scope(squeezenet_arg_scope()):
+def inference(images, 
+              is_training=True,
+              batch_norm_decay=0.999):
+    with slim.arg_scope(squeezenet_arg_scope(is_training, batch_norm_decay)):
         with tf.variable_scope('squeezenet', values=[images]) as sc:
             end_point_collection = sc.original_name_scope + '_end_points'
             with slim.arg_scope([fire_module, slim.conv2d,
@@ -68,6 +70,9 @@ def inference(images):
     return logits, end_points
 
 
-def squeezenet_arg_scope():
-    with slim.arg_scope([slim.conv2d], normalizer_fn=slim.batch_norm) as sc:
+def squeezenet_arg_scope(is_training, decay):
+    with slim.arg_scope([slim.conv2d], normalizer_fn=slim.batch_norm):
+      with slim.arg_scope([slim.batch_norm], 
+                          is_training=is_training,
+                          decay=decay) as sc:
         return sc
