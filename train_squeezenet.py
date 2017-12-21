@@ -1,115 +1,184 @@
+import os
 import tensorflow as tf
 
-from models.slim.deployment import model_deploy
-from models.slim.preprocessing import preprocessing_factory
-from models.slim.datasets import dataset_factory
-from tensorflow.python.ops import control_flow_ops
+from slim.deployment import model_deploy
 
-import squeezenet
-import arg_parsing
-
-slim = tf.contrib.slim
-args = arg_parsing.parse_args(training=True)
-
-tf.logging.set_verbosity(tf.logging.INFO)
-deploy_config = model_deploy.DeploymentConfig(num_clones=args.num_gpus)
+from squeezenet import inputs
+from squeezenet import networks
+from squeezenet import arg_parsing
+from squeezenet import metrics
 
 
-with tf.Graph().as_default() as g:
+def _run(args):
+    network = networks.catalogue[args.network](args)
+
+    deploy_config = _configure_deployment(args.num_gpus)
+    sess = tf.Session(config=_configure_session())
+
     with tf.device(deploy_config.variables_device()):
-        global_step = slim.create_global_step()
+        global_step = tf.train.create_global_step()
 
-    dataset = dataset_factory.get_dataset('cifar10', 'train', args.data_dir)
+    with tf.device(deploy_config.optimizer_device()):
+        optimizer = tf.train.AdamOptimizer(
+            learning_rate=args.learning_rate
+        )
 
-    network_fn = squeezenet.inference
+    '''Inputs'''
+    with tf.device(deploy_config.inputs_device()), tf.name_scope('inputs'):
+        pipeline = inputs.Pipeline(args, sess)
+        examples, labels = pipeline.data
+        images = examples['image']
 
-    def clone_fn(batch_queue):
-        images, labels = batch_queue.dequeue()
-        logits, end_points = network_fn(images)
-        slim.losses.softmax_cross_entropy(logits, labels)
-        predictions = tf.argmax(logits, 1)
-        labels = tf.argmax(labels, 1)
-        accuracy, update_op = slim.metrics.streaming_accuracy(
-           predictions,
-           labels,
-           metrics_collections=['accuracy'],
-           updates_collections=tf.GraphKeys.UPDATE_OPS)
-        return end_points
+        image_splits = tf.split(
+            value=images,
+            num_or_size_splits=deploy_config.num_clones,
+            name='split_images'
+        )
+        label_splits = tf.split(
+            value=labels,
+            num_or_size_splits=deploy_config.num_clones,
+            name='split_labels'
+        )
 
-    image_preprocessing_fn = preprocessing_factory.get_preprocessing(
-        'cifarnet', is_training=True)
+    '''Model Creation'''
+    model_dp = model_deploy.deploy(
+        config=deploy_config,
+        model_fn=_clone_fn,
+        optimizer=optimizer,
+        kwargs={
+            'images': image_splits,
+            'labels': label_splits,
+            'index_iter': iter(range(deploy_config.num_clones)),
+            'network': network,
+            'is_training': pipeline.is_training
+        }
+    )
 
-    with tf.device(deploy_config.inputs_device()):
-        with tf.name_scope('inputs'):
-            provider = slim.dataset_data_provider.DatasetDataProvider(
-                  dataset,
-                  num_readers=args.reader_threads,
-                  common_queue_capacity=20 * args.batch_size,
-                  common_queue_min=10 * args.batch_size)
-            [image, label] = provider.get(['image', 'label'])
+    '''Metrics'''
+    train_metrics = metrics.Metrics(
+        labels=labels,
+        clone_predictions=[clone.outputs['predictions']
+                           for clone in model_dp.clones],
+        device=deploy_config.variables_device(),
+        name='training'
+    )
+    validation_metrics = metrics.Metrics(
+        labels=labels,
+        clone_predictions=[clone.outputs['predictions']
+                           for clone in model_dp.clones],
+        device=deploy_config.variables_device(),
+        name='validation',
+        padded_data=True
+    )
+    validation_init_op = tf.group(
+        pipeline.validation_iterator.initializer,
+        validation_metrics.reset_op
+    )
+    train_op = tf.group(
+        model_dp.train_op,
+        train_metrics.update_op
+    )
 
-            image = image_preprocessing_fn(image, 32, 32)
-            images, labels = tf.train.batch(
-                  [image, label],
-                  batch_size=args.batch_size,
-                  num_threads=args.preprocessing_threads,
-                  capacity=5 * args.batch_size)
-            labels = slim.one_hot_encoding(labels, 10)
+    '''Summaries'''
+    with tf.device(deploy_config.variables_device()):
+        train_writer = tf.summary.FileWriter(args.model_dir, sess.graph)
+        eval_dir = os.path.join(args.model_dir, 'eval')
+        eval_writer = tf.summary.FileWriter(eval_dir, sess.graph)
+        tf.summary.scalar('accuracy', train_metrics.accuracy)
+        tf.summary.scalar('loss', model_dp.total_loss)
+        all_summaries = tf.summary.merge_all()
 
-            batch_queue = slim.prefetch_queue.prefetch_queue(
-                  [images, labels], capacity=2 * deploy_config.num_clones)
+    '''Model Checkpoints'''
+    saver = tf.train.Saver(max_to_keep=args.keep_last_n_checkpoints)
+    save_path = os.path.join(args.model_dir, 'model.ckpt')
 
-    summaries = set(tf.get_collection(tf.GraphKeys.SUMMARIES))
-    clones = model_deploy.create_clones(deploy_config, clone_fn, [batch_queue])
-    first_clone_scope = deploy_config.clone_scope(0)
-    update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS, first_clone_scope)
+    '''Model Initialization'''
+    last_checkpoint = tf.train.latest_checkpoint(args.model_dir)
+    if last_checkpoint:
+        saver.restore(sess, last_checkpoint)
+    else:
+        init_op = tf.group(tf.global_variables_initializer(),
+                           tf.local_variables_initializer())
+        sess.run(init_op)
+    starting_step = sess.run(global_step)
 
-    with tf.name_scope('synchronized_train'):
-        with tf.device(deploy_config.optimizer_device()):
-            learning_rate = tf.train.exponential_decay(
-                args.learning_rate,
-                global_step,
-                args.learning_rate_decay_steps,
-                args.learning_rate_decay,
-                staircase=True,
-                name='exponential_decay_learning_rate')
-            optimizer = tf.train.AdamOptimizer(learning_rate)
-        variables_to_train = tf.trainable_variables()
-        total_loss, clones_gradients = model_deploy.optimize_clones(
-                clones,
-                optimizer,
-                var_list=variables_to_train)
-        grad_updates = optimizer.apply_gradients(clones_gradients,
-                                                 global_step=global_step)
-        update_ops.append(grad_updates)
-        update_op = tf.group(*update_ops)
-        train_tensor = control_flow_ops.with_dependencies([update_op],
-                                                          total_loss,
-                                                          name='train_op')
-    with tf.name_scope('summaries'):
-        end_points = clones[0].outputs
-        for end_point in end_points:
-            x = end_points[end_point]
-            summaries.add(tf.histogram_summary('activations/' + end_point, x))
-            summaries.add(tf.scalar_summary('sparsity/' + end_point,
-                                            tf.nn.zero_fraction(x)))
-        for variable in slim.get_model_variables():
-            summaries.add(tf.histogram_summary(variable.op.name, variable))
-        summaries.add(tf.scalar_summary('learning_rate', learning_rate,
-                                        name='learning_rate'))
-        summaries.add(tf.scalar_summary('eval/total_loss', total_loss,
-                                        name='total_loss_summary'))
-        accuracy = tf.get_collection('accuracy', first_clone_scope)[0]
-        summaries.add(tf.scalar_summary('eval/accuracy', accuracy))
-        summaries |= set(tf.get_collection(tf.GraphKeys.SUMMARIES,
-                                           first_clone_scope))
-        summary_op = tf.merge_summary(list(summaries), name='summary_op')
+    '''Main Loop'''
+    for train_step in range(starting_step, args.max_train_steps):
+        sess.run(train_op, feed_dict=pipeline.training_data)
 
-    slim.learning.train(
-        train_tensor,
-        args.output_training_dir,
-        summary_op=summary_op,
-        number_of_steps=args.max_steps,
-        log_every_n_steps=args.print_log_steps,
-        save_summaries_secs=args.save_summaries_secs,
-        save_interval_secs=args.save_checkpoint_secs)
+        '''Summary Hook'''
+        if train_step % args.summary_interval == 0:
+            results = sess.run(
+                fetches={'accuracy': train_metrics.accuracy,
+                         'summary': all_summaries},
+                feed_dict=pipeline.training_data
+            )
+            train_writer.add_summary(results['summary'], train_step)
+            print('Train Step {:<5}:  {:>.4}'
+                  .format(train_step, results['accuracy']))
+
+        '''Checkpoint Hooks'''
+        if train_step % args.checkpoint_interval == 0:
+            saver.save(sess, save_path, global_step)
+
+        sess.run(train_metrics.reset_op)
+
+        '''Eval Hook'''
+        if train_step % args.validation_interval == 0:
+            while True:
+                try:
+                    sess.run(
+                        fetches=validation_metrics.update_op,
+                        feed_dict=pipeline.validation_data
+                    )
+                except tf.errors.OutOfRangeError:
+                    break
+            results = sess.run({'accuracy': validation_metrics.accuracy})
+
+            print('Evaluation Step {:<5}:  {:>.4}'
+                  .format(train_step, results['accuracy']))
+
+            summary = tf.Summary(value=[
+                tf.Summary.Value(tag='accuracy', simple_value=results['accuracy']),
+            ])
+            eval_writer.add_summary(summary, train_step)
+            sess.run(validation_init_op)  # Reinitialize dataset and metrics
+
+
+def _clone_fn(images,
+              labels,
+              index_iter,
+              network,
+              is_training):
+    clone_index = next(index_iter)
+    images = images[clone_index]
+    labels = labels[clone_index]
+
+    unscaled_logits = network.build(images, is_training)
+    tf.losses.sparse_softmax_cross_entropy(labels=labels,
+                                           logits=unscaled_logits)
+    predictions = tf.argmax(unscaled_logits, 1, name='predictions')
+    return {
+        'predictions': predictions,
+        'images': images,
+    }
+
+
+def _configure_deployment(num_gpus):
+    return model_deploy.DeploymentConfig(num_clones=num_gpus)
+
+
+def _configure_session():
+    gpu_config = tf.GPUOptions(per_process_gpu_memory_fraction=.8)
+    return tf.ConfigProto(allow_soft_placement=True,
+                          gpu_options=gpu_config)
+
+
+def run(args=None):
+    args = arg_parsing.ArgParser().parse_args(args)
+    with tf.Graph().as_default():
+        _run(args)
+
+
+if __name__ == '__main__':
+    run()
